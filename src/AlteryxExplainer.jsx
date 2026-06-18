@@ -279,6 +279,22 @@ function localExplain(parsed, ordered) {
   }
 }
 
+// Full, deterministic step-by-step (no model): every active tool, grouped by phase.
+function buildDetailed(ordered) {
+  const META = {
+    input: ["📥", "Bring in the data"], prep: ["🧹", "Clean and prepare"],
+    transform: ["⚙️", "Transform and calculate"], combine: ["🔗", "Combine the streams"],
+    aggregate: ["📊", "Summarise"], output: ["📤", "Deliver the result"],
+  }
+  const order = ["input", "prep", "transform", "combine", "aggregate", "output"]
+  const buckets = {}; order.forEach(k => buckets[k] = [])
+  ordered.forEach(t => buckets[PHASE_OF[t.type] || "transform"].push(t))
+  return order.filter(k => buckets[k].length).map(k => ({
+    emoji: META[k][0], name: META[k][1],
+    steps: buckets[k].map(t => ({ tool: t.type, note: t.annotation || t.detail || "" })),
+  }))
+}
+
 // ══════════════════════════════════════════════════════════════
 //  UI tokens (matched to the BrainSpark notes look)
 // ══════════════════════════════════════════════════════════════
@@ -392,6 +408,9 @@ export default function App() {
     const parts = (r.parts || []).map((p, i) => `
       <section><h2>${i + 1}. ${esc(p.name)}</h2><p class="sum">${esc(p.summary)}</p>
       ${(p.steps || []).map(s => `<div class="step"><b>${esc(s.tool)}</b> — ${esc(s.action)}</div>`).join("")}</section>`).join("")
+    const detailed = "<h2>Full step by step</h2>" + buildDetailed(ordered).map((p, i) =>
+      `<h3 style="font-family:'Lora',serif;color:#1a1a2e;margin-top:20px">${esc(p.emoji)} Part ${i + 1}: ${esc(p.name)} (${p.steps.length} tools)</h3>` +
+      p.steps.map((s, j) => `<div class="step">${j + 1}. <b>${esc(s.tool)}</b>${s.note ? " — " + esc(s.note) : ""}</div>`).join("")).join("")
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(r.title)}</title>
       <style>body{font-family:'Source Sans 3',Georgia,sans-serif;max-width:780px;margin:40px auto;color:#374151;line-height:1.8;padding:0 24px}
       h1{font-family:'Lora',serif;color:#1a1a2e;border-bottom:3px solid #3730a3;padding-bottom:14px}
@@ -409,6 +428,7 @@ export default function App() {
       <p><b>Inputs:</b> ${(r.inputs || []).map(x => `<span class="chip">${esc(x)}</span>`).join("")}<br>
       <b>Outputs:</b> ${(r.outputs || []).map(x => `<span class="chip">${esc(x)}</span>`).join("")}</p>
       ${parts}${(r.takeaways || []).length ? `<h2>Key takeaways</h2>${r.takeaways.map(t => `<div class="step">${esc(t)}</div>`).join("")}` : ""}
+      ${detailed}
       </body></html>`
     const a = document.createElement("a")
     a.href = URL.createObjectURL(new Blob([html], { type: "text/html" }))
@@ -587,6 +607,26 @@ export default function App() {
                   ))}
                 </>
               )}
+
+              {/* full step-by-step — built locally, never truncated */}
+              <hr style={{ border: "none", borderTop: `1px solid ${C.line}`, margin: "26px 0" }} />
+              <h2 style={hLora}>Full step by step</h2>
+              <p style={{ ...para, color: C.muted, fontStyle: "italic", margin: "0 0 14px" }}>Every tool in the workflow, in execution order, grouped by phase.</p>
+              {buildDetailed(ordered).map((p, i) => (
+                <div key={i} style={{ marginBottom: 18 }}>
+                  <div style={{ fontFamily: "'Lora',Georgia,serif", fontWeight: 700, fontSize: 16, color: C.ink, marginBottom: 8 }}>
+                    {p.emoji} Part {i + 1}: {p.name}{" "}
+                    <span style={{ fontSize: 12, color: C.muted, fontWeight: 400 }}>({p.steps.length} tools)</span>
+                  </div>
+                  {p.steps.map((s, j) => (
+                    <div key={j} style={{ display: "flex", gap: 10, padding: "6px 0", borderBottom: "1px solid #f1f1ee" }}>
+                      <span style={{ fontSize: 11.5, color: C.muted, minWidth: 24 }}>{j + 1}.</span>
+                      <span style={{ fontWeight: 700, color: C.accent, fontSize: 13.5 }}>{s.tool}</span>
+                      {s.note && <span style={{ fontSize: 13.5, color: C.body }}>— {s.note}</span>}
+                    </div>
+                  ))}
+                </div>
+              ))}
             </div>
           </div>
         )}
