@@ -96,7 +96,18 @@ function parseAlteryx(xmlString) {
     if (o && d) connections.push({ from: o.getAttribute("ToolID"), to: d.getAttribute("ToolID") })
   })
 
-  return { tools, connections }
+  // The author's Tool Container captions are the best source of phase structure
+  const containers = []
+  doc.querySelectorAll("Node").forEach(node => {
+    const gui = node.querySelector(":scope > GuiSettings") || node.querySelector("GuiSettings")
+    const plugin = gui ? (gui.getAttribute("Plugin") || "") : ""
+    if (/ToolContainer/i.test(plugin)) {
+      const cap = clean(txt(node, ":scope > Properties > Configuration > Caption"))
+      if (cap) containers.push(cap)
+    }
+  })
+
+  return { tools, connections, containers }
 }
 
 // Pull the one or two config bits that explain what a tool is set to do
@@ -162,15 +173,49 @@ function executionOrder({ tools, connections }) {
   return ordered.map(id => tools[id]).filter(t => !NOISE.has(t.type))
 }
 
-// Build the compact brief we hand to the model
+// Build the brief we hand to the model. Big workflows are condensed so the
+// request stays small (avoids token / rate-limit errors) and the model can summarise.
 function buildBrief(parsed, ordered) {
-  const lines = ordered.map((t, i) => {
-    let s = `${i + 1}. ${t.type}`
-    if (t.annotation) s += ` — labelled "${t.annotation}"`
-    if (t.detail) s += ` [${t.detail}]`
-    return s
-  })
-  return `An Alteryx workflow with ${ordered.length} active tools, in execution order:\n${lines.join("\n")}`
+  const uniq = a => [...new Set(a)].filter(Boolean)
+  const cut = (s, n = 90) => { s = s || ""; return s.length > n ? s.slice(0, n) + "…" : s }
+
+  // Small workflow → send every tool in order, full detail.
+  if (ordered.length <= 25) {
+    const lines = ordered.map((t, i) => {
+      let s = `${i + 1}. ${t.type}`
+      if (t.annotation) s += ` — labelled "${cut(t.annotation, 70)}"`
+      if (t.detail) s += ` [${cut(t.detail, 90)}]`
+      return s
+    })
+    return `An Alteryx workflow with ${ordered.length} active tools, in execution order:\n${lines.join("\n")}`
+  }
+
+  // Large workflow → condensed structure only.
+  const counts = {}
+  ordered.forEach(t => { counts[t.type] = (counts[t.type] || 0) + 1 })
+  const countLine = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${v} ${k}`).join(", ")
+
+  const inputs   = uniq(ordered.filter(t => t.type === "Input Data" && t.detail).map(t => cut(t.detail, 60)))
+  const outputs  = uniq(ordered.filter(t => t.type === "Output Data" && t.detail).map(t => cut(t.detail, 60)))
+  const joinKeys = uniq(ordered.filter(t => /Join/.test(t.type) && t.detail).map(t => cut(t.detail, 55))).slice(0, 12)
+  const fuzzy    = uniq(ordered.filter(t => t.type === "Fuzzy Match" && t.detail).map(t => cut(t.detail, 70))).slice(0, 4)
+  const spatial  = uniq(ordered.filter(t => /Spatial|Buffer|Trade Area|Find Nearest|Point In|Create Points/.test(t.type)).map(t => `${t.type}${t.detail ? " (" + cut(t.detail, 55) + ")" : ""}`)).slice(0, 8)
+  const groupBys = uniq(ordered.filter(t => t.type === "Summarize" && t.detail).map(t => cut(t.detail, 70))).slice(0, 10)
+  const notes    = uniq(ordered.filter(t => t.annotation).map(t => cut(t.annotation, 80))).slice(0, 25)
+  const containers = (parsed.containers || []).map(c => cut(c, 70)).slice(0, 12)
+
+  const L = [`A large Alteryx workflow with ${ordered.length} active tools.`, `Tool counts: ${countLine}.`]
+  if (containers.length) L.push(`The author grouped the work into these labelled sections — use them as the phases, in this order: ${containers.join(" | ")}.`)
+  if (inputs.length)   L.push(`Inputs: ${inputs.join("; ")}.`)
+  if (outputs.length)  L.push(`Outputs: ${outputs.join("; ")}.`)
+  if (spatial.length)  L.push(`Spatial operations: ${spatial.join("; ")}.`)
+  if (fuzzy.length)    L.push(`Fuzzy matching on: ${fuzzy.join("; ")}.`)
+  if (joinKeys.length) L.push(`Records are joined on keys like: ${joinKeys.join("; ")}.`)
+  if (groupBys.length) L.push(`Aggregations group by: ${groupBys.join("; ")}.`)
+  if (notes.length)    L.push(`Tool labels left by the author: ${notes.join("; ")}.`)
+
+  let brief = L.join("\n")
+  return brief.length > 6000 ? brief.slice(0, 6000) : brief
 }
 
 // ── Model call → your Groq backend (api/explain-alteryx.js) ──
@@ -208,15 +253,12 @@ function localExplain(parsed, ordered) {
     aggregate: ["📊", "Summarise", "Rolls the records up into totals and groups."],
     output: ["📤", "Deliver the Result", "Writes out or displays the finished data."],
   }
+  const mkStep = t => ({ tool: t.type, action: t.annotation || (t.detail ? `${t.type} — ${t.detail}` : `Applies a ${t.type} step.`) })
   const parts = Object.entries(buckets).filter(([, v]) => v.length).map(([k, v]) => {
     const [emoji, name, summary] = META[k]
-    return {
-      emoji, name, summary,
-      steps: v.map(t => ({
-        tool: t.type,
-        action: t.annotation || (t.detail ? `${t.type} — ${t.detail}` : `Applies a ${t.type} step.`),
-      })),
-    }
+    const steps = v.slice(0, 8).map(mkStep)
+    if (v.length > 8) steps.push({ tool: "More", action: `Plus ${v.length - 8} further steps of this kind in this phase.` })
+    return { emoji, name, summary, steps }
   })
   const inputs = ordered.filter(t => t.type === "Input Data" && t.detail).map(t => t.detail)
   const outputs = ordered.filter(t => t.type === "Output Data" && t.detail).map(t => t.detail)
